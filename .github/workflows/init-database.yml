@@ -1,0 +1,54 @@
+# Initialize Database - Creates database and runs migrations
+name: Initialize Database
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-2
+
+jobs:
+  init-database:
+    runs-on: ubuntu-latest
+    environment: dev
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Get database connection string
+        id: get-db
+        run: |
+          CONNECTION_STRING=$(aws ssm get-parameter --name "/medtech/dev/database/connection-string" --with-decryption --query 'Parameter.Value' --output text)
+          echo "::add-mask::$CONNECTION_STRING"
+          echo "connection_string=$CONNECTION_STRING" >> $GITHUB_OUTPUT
+      
+      - name: Install EF Core tools
+        run: dotnet tool install --global dotnet-ef
+      
+      - name: Restore dependencies
+        run: dotnet restore
+      
+      - name: Run migrations
+        env:
+          ConnectionStrings__DefaultConnection: ${{ steps.get-db.outputs.connection_string }}
+        run: |
+          cd medtech.Patient.Auth.WebApi
+          dotnet ef database update --project ../medtech.Patient.Auth.Persistence/medtech.Patient.Auth.Persistence.csproj --startup-project . --verbose
+      
+      - name: Verify database
+        run: |
+          echo "✅ Database migration completed successfully"
+

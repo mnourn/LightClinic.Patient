@@ -1,0 +1,31 @@
+name: Deploy to AWS (Prod)
+
+on:
+  push:
+    branches:
+      - prod
+      - production
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/aws-deploy-reusable.yml
+    with:
+      environment_name: prod
+      aws_region: us-east-2
+      ecr_registry: 025044154610.dkr.ecr.us-east-2.amazonaws.com
+      ecr_repository: medtech-prod-patient-auth
+      service_name: medtech-prod-patient-auth
+      app_runner_access_role_arn: arn:aws:iam::025044154610:role/medtech-dev-apprunner-ecr-access
+      app_runner_instance_role_arn: arn:aws:iam::025044154610:role/medtech-dev-apprunner-instance
+      app_runner_autoscaling_arn: arn:aws:apprunner:us-east-2:025044154610:autoscalingconfiguration/medtech-prod-scaling/1/4f130cc420874a7482cc80dbe51f45bc
+      aspnetcore_environment: Production
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      MEDTECH_CONNECTION_STRING: ${{ secrets.MEDTECH_CONNECTION_STRING }}
+      MEDTECH_JWT_ISSUER_SIGNING_KEY: ${{ secrets.MEDTECH_JWT_ISSUER_SIGNING_KEY }}
+      MEDTECH_GOOGLE_CLIENT_ID: ${{ secrets.MEDTECH_GOOGLE_CLIENT_ID }}
+      MEDTECH_GOOGLE_CLIENT_SECRET: ${{ secrets.MEDTECH_GOOGLE_CLIENT_SECRET }}
+

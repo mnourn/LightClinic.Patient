@@ -1,0 +1,46 @@
+using System;
+using Microsoft.EntityFrameworkCore.Migrations;
+
+#nullable disable
+
+namespace lightClinic.Patient.Persistence.Migrations
+{
+    /// <inheritdoc />
+    public partial class AddLockoutColumns : Migration
+    {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder)
+        {
+            migrationBuilder.AddColumn<int>(
+                name: "AccessFailedCount",
+                schema: "dbo",
+                table: "AspNetUsers",
+                type: "int",
+                nullable: false,
+                defaultValue: 0);
+
+            migrationBuilder.AddColumn<DateTimeOffset>(
+                name: "LockoutEnd",
+                schema: "dbo",
+                table: "AspNetUsers",
+                type: "datetimeoffset",
+                nullable: true);
+
+            migrationBuilder.Sql("UPDATE dbo.AspNetUsers SET LockoutEnabled = 1");
+        }
+
+        /// <inheritdoc />
+        protected override void Down(MigrationBuilder migrationBuilder)
+        {
+            migrationBuilder.DropColumn(
+                name: "AccessFailedCount",
+                schema: "dbo",
+                table: "AspNetUsers");
+
+            migrationBuilder.DropColumn(
+                name: "LockoutEnd",
+                schema: "dbo",
+                table: "AspNetUsers");
+        }
+    }
+}

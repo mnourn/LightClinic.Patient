@@ -1,0 +1,220 @@
+name: AWS Deploy Reusable
+
+on:
+  workflow_call:
+    inputs:
+      environment_name:
+        required: true
+        type: string
+      aws_region:
+        required: true
+        type: string
+      ecr_registry:
+        required: true
+        type: string
+      ecr_repository:
+        required: true
+        type: string
+      service_name:
+        required: true
+        type: string
+      app_runner_access_role_arn:
+        required: true
+        type: string
+      app_runner_instance_role_arn:
+        required: true
+        type: string
+      app_runner_autoscaling_arn:
+        required: true
+        type: string
+      aspnetcore_environment:
+        required: true
+        type: string
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      MEDTECH_CONNECTION_STRING:
+        required: true
+      MEDTECH_JWT_ISSUER_SIGNING_KEY:
+        required: true
+      MEDTECH_GOOGLE_CLIENT_ID:
+        required: true
+      MEDTECH_GOOGLE_CLIENT_SECRET:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+    concurrency:
+      group: deploy-${{ inputs.environment_name }}-${{ inputs.service_name }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ inputs.ecr_registry }}
+          ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+        run: |
+          set -euo pipefail
+
+          IMAGE_TAG="${GITHUB_SHA}"
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          LATEST_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+
+          docker build \
+            -f medtech.Patient.Auth.WebApi/Dockerfile \
+            -t "${IMAGE_URI}" \
+            -t "${LATEST_URI}" \
+            .
+
+          docker push "${IMAGE_URI}"
+          docker push "${LATEST_URI}"
+
+          echo "image_uri=${IMAGE_URI}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create or update App Runner service
+        id: deploy
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+          IMAGE_URI: ${{ steps.build-image.outputs.image_uri }}
+          ACCESS_ROLE_ARN: ${{ inputs.app_runner_access_role_arn }}
+          INSTANCE_ROLE_ARN: ${{ inputs.app_runner_instance_role_arn }}
+          AUTOSCALING_ARN: ${{ inputs.app_runner_autoscaling_arn }}
+          ASPNETCORE_ENVIRONMENT: ${{ inputs.aspnetcore_environment }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+          MEDTECH_CONNECTION_STRING: ${{ secrets.MEDTECH_CONNECTION_STRING }}
+          MEDTECH_JWT_ISSUER_SIGNING_KEY: ${{ secrets.MEDTECH_JWT_ISSUER_SIGNING_KEY }}
+          MEDTECH_GOOGLE_CLIENT_ID: ${{ secrets.MEDTECH_GOOGLE_CLIENT_ID }}
+          MEDTECH_GOOGLE_CLIENT_SECRET: ${{ secrets.MEDTECH_GOOGLE_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+
+          SERVICE_ARN="$(aws apprunner list-services --query "ServiceSummaryList[?ServiceName=='${SERVICE_NAME}'].ServiceArn | [0]" --output text)"
+          if [ "${SERVICE_ARN}" = "None" ]; then
+            SERVICE_ARN=""
+          fi
+
+          SOURCE_CONFIGURATION="$(jq -cn \
+            --arg accessRoleArn "${ACCESS_ROLE_ARN}" \
+            --arg imageUri "${IMAGE_URI}" \
+            --arg aspnetcoreEnvironment "${ASPNETCORE_ENVIRONMENT}" \
+            --arg awsRegion "${AWS_REGION}" \
+            --arg medtechConnectionString "${MEDTECH_CONNECTION_STRING}" \
+            --arg medtechJwtKey "${MEDTECH_JWT_ISSUER_SIGNING_KEY}" \
+            --arg medtechGoogleClientId "${MEDTECH_GOOGLE_CLIENT_ID}" \
+            --arg medtechGoogleClientSecret "${MEDTECH_GOOGLE_CLIENT_SECRET}" \
+            '{
+              AuthenticationConfiguration: {
+                AccessRoleArn: $accessRoleArn
+              },
+              ImageRepository: {
+                ImageIdentifier: $imageUri,
+                ImageRepositoryType: "ECR",
+                ImageConfiguration: {
+                  Port: "8080",
+                  RuntimeEnvironmentVariables: {
+                    ASPNETCORE_ENVIRONMENT: $aspnetcoreEnvironment,
+                    ASPNETCORE_URLS: "http://+:8080",
+                    AWS_REGION: $awsRegion,
+                    MEDTECH_CONNECTION_STRING: $medtechConnectionString,
+                    MEDTECH_JWT_ISSUER_SIGNING_KEY: $medtechJwtKey,
+                    MEDTECH_GOOGLE_CLIENT_ID: $medtechGoogleClientId,
+                    MEDTECH_GOOGLE_CLIENT_SECRET: $medtechGoogleClientSecret
+                  }
+                }
+              }
+            }')"
+
+          if [ -z "${SERVICE_ARN}" ]; then
+            echo "Creating App Runner service: ${SERVICE_NAME}"
+            CREATE_OUTPUT="$(aws apprunner create-service \
+              --service-name "${SERVICE_NAME}" \
+              --source-configuration "${SOURCE_CONFIGURATION}" \
+              --instance-configuration "{
+                \"Cpu\": \"0.5 vCPU\",
+                \"Memory\": \"1 GB\",
+                \"InstanceRoleArn\": \"${INSTANCE_ROLE_ARN}\"
+              }" \
+              --auto-scaling-configuration-arn "${AUTOSCALING_ARN}" \
+              --health-check-configuration "{
+                \"Protocol\": \"HTTP\",
+                \"Path\": \"/health\",
+                \"Interval\": 10,
+                \"Timeout\": 5,
+                \"HealthyThreshold\": 1,
+                \"UnhealthyThreshold\": 5
+              }" \
+              --tags Key=Environment,Value="${ENVIRONMENT_NAME}" Key=Project,Value=medtech)"
+            SERVICE_ARN="$(echo "${CREATE_OUTPUT}" | jq -r '.Service.ServiceArn')"
+          else
+            echo "Updating App Runner service: ${SERVICE_NAME}"
+            aws apprunner update-service \
+              --service-arn "${SERVICE_ARN}" \
+              --source-configuration "${SOURCE_CONFIGURATION}" >/dev/null
+          fi
+
+          OPERATION_ID="$(aws apprunner list-operations --service-arn "${SERVICE_ARN}" --query 'OperationSummaryList[0].Id' --output text)"
+          if [ -n "${OPERATION_ID}" ] && [ "${OPERATION_ID}" != "None" ]; then
+            echo "Waiting for App Runner operation: ${OPERATION_ID}"
+            ATTEMPT=0
+            MAX_ATTEMPTS=60
+            SLEEP_SECONDS=10
+
+            while [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
+              STATUS="$(aws apprunner list-operations --service-arn "${SERVICE_ARN}" --query "OperationSummaryList[?Id=='${OPERATION_ID}'].Status | [0]" --output text)"
+              echo "Operation status: ${STATUS}"
+
+              if [ "${STATUS}" = "SUCCEEDED" ]; then
+                break
+              fi
+
+              if [ "${STATUS}" = "FAILED" ] || [ "${STATUS}" = "ROLLBACK_FAILED" ]; then
+                echo "Deployment operation failed with status: ${STATUS}"
+                exit 1
+              fi
+
+              ATTEMPT=$((ATTEMPT + 1))
+              sleep "${SLEEP_SECONDS}"
+            done
+
+            if [ "${ATTEMPT}" -ge "${MAX_ATTEMPTS}" ]; then
+              echo "Timed out waiting for App Runner operation ${OPERATION_ID}"
+              exit 1
+            fi
+          fi
+
+          SERVICE_URL="$(aws apprunner list-services --query "ServiceSummaryList[?ServiceName=='${SERVICE_NAME}'].ServiceUrl | [0]" --output text)"
+
+          echo "service_arn=${SERVICE_ARN}" >> "${GITHUB_OUTPUT}"
+          echo "service_url=${SERVICE_URL}" >> "${GITHUB_OUTPUT}"
+
+      - name: Deployment summary
+        run: |
+          echo "## Deployment Complete" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- Environment: \`${{ inputs.environment_name }}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- Service: \`${{ inputs.service_name }}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- URL: https://${{ steps.deploy.outputs.service_url }}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- Image: \`${{ steps.build-image.outputs.image_uri }}\`" >> "${GITHUB_STEP_SUMMARY}"
